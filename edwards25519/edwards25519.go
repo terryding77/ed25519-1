@@ -7,7 +7,9 @@
 // http://ed25519.cr.yp.to/.
 package edwards25519
 
-// This code is a port of the public domain, "ref10" implementation of ed25519
+import "encoding/binary"
+
+// This code is a port of the public domain, “ref10” implementation of ed25519
 // from SUPERCOP.
 
 // FieldElement represents an element of the field GF(2^255 - 19).  An element
@@ -373,7 +375,7 @@ func FeCombine(h *FieldElement, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9 int64) {
 // 10 of them are 2-way parallelizable and vectorizable.
 // Can get away with 11 carries, but then data flow is much deeper.
 //
-// With tighter constraints on inputs can squeeze carries into int32.
+// With tighter constraints on inputs, can squeeze carries into int32.
 func FeMul(h, f, g *FieldElement) {
 	f0 := int64(f[0])
 	f1 := int64(f[1])
@@ -928,7 +930,8 @@ func GeDoubleScalarMultVartime(r *ProjectiveGroupElement, a *[32]byte, A *Extend
 	}
 }
 
-// equal returns 1 if b == c and 0 otherwise.
+// equal returns 1 if b == c and 0 otherwise, assuming that b and c are
+// non-negative.
 func equal(b, c int32) int32 {
 	x := uint32(b ^ c)
 	x--
@@ -1770,4 +1773,69 @@ func ScReduce(out *[32]byte, s *[64]byte) {
 	out[29] = byte(s11 >> 1)
 	out[30] = byte(s11 >> 9)
 	out[31] = byte(s11 >> 17)
+}
+
+// order is the order of Curve25519 in little-endian form.
+var order = [4]uint64{0x5812631a5cf5d3ed, 0x14def9dea2f79cd6, 0, 0x1000000000000000}
+
+// ScMinimal returns true if the given scalar is less than the order of the
+// curve.
+func ScMinimal(scalar *[32]byte) bool {
+	for i := 3; ; i-- {
+		v := binary.LittleEndian.Uint64(scalar[i*8:])
+		if v > order[i] {
+			return false
+		} else if v < order[i] {
+			break
+		} else if i == 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// below is extra function
+
+// ExtendedGroupElementCMove is a constant time conditional move
+// Replace (t,u) with (u,u) if b == 1;
+// Replace (t,u) with (t,u) if b == 0.
+//
+// This function is constant time
+//
+// Preconditions: b in {0,1}.
+func ExtendedGroupElementCMove(t, u *ExtendedGroupElement, b int32) {
+	FeCMove(&t.X, &u.X, b)
+	FeCMove(&t.Y, &u.Y, b)
+	FeCMove(&t.Z, &u.Z, b)
+	FeCMove(&t.T, &u.T, b)
+}
+
+// ScalarMult sets r = k*P
+// where k is a scalar and P is a point
+// k should be little endian, that is:
+//   k = k[0]+256*k[1]+...+256^31 k[31]
+// This function is constant time
+// It executes exactly 256 point additions, 256 point doublings and 256 conditional moves
+func ScalarMult(out *ExtendedGroupElement, k *[32]byte, p *ExtendedGroupElement) {
+	tmpP := *p
+
+	var cach CachedGroupElement
+	var comp CompletedGroupElement
+	var e ExtendedGroupElement
+
+	out.Zero()
+
+	for _, byte := range k {
+		for bitNum := uint(8); bitNum > 0; bitNum-- {
+			tmpP.ToCached(&cach)
+			geAdd(&comp, out, &cach)
+
+			comp.ToExtended(&e)
+			ExtendedGroupElementCMove(out, &e, int32((byte>>(8-bitNum))&1))
+
+			tmpP.Double(&comp)
+			comp.ToExtended(&tmpP)
+		}
+	}
 }
